@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 
-const PORT = process.env.PORT || 4173;
+const PORT = process.env.PORT || 3000;
 const ROOT = path.join(__dirname, "public");
 const USER_AGENT = "EastCoastOutageWeatherMap/1.0 (local dashboard)";
 
