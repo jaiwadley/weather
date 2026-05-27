@@ -243,6 +243,6 @@ http.createServer((req, res) => {
   const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
   if (pathname.startsWith("/api/")) return handleApi(pathname, res);
   serveStatic(req, res);
-}).listen(PORT, "127.0.0.1", () => {
+}).listen(PORT, "0.0.0.0", () => {
   console.log(`East Coast outage weather map: http://localhost:${PORT}`);
 });
