@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>East Coast Outage Weather Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar" aria-label="Dashboard summary">
+        <div>
+          <p class="eyebrow">Live East Coast grid risk</p>
+          <h1>Weather and power outages</h1>
+        </div>
+        <div class="status">
+          <span id="last-updated">Starting live feed...</span>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+      </section>
+
+      <section class="layout">
+        <div class="map-wrap">
+          <div id="map" aria-label="Map of East Coast weather alerts, outage totals, and forecast risk"></div>
+          <div class="legend" aria-label="Map legend">
+            <span><i class="swatch alert"></i>NWS alert</span>
+            <span><i class="swatch outage"></i>Outage total</span>
+            <span><i class="swatch trend"></i>Forecast risk</span>
+            <span><i class="swatch pressure"></i>Pressure outlook</span>
+          </div>
+        </div>
+
+        <aside class="panel">
+          <div class="metric-grid">
+            <article>
+              <span>East Coast outages</span>
+              <strong id="total-outages">--</strong>
+            </article>
+            <article>
+              <span>NWS alerts</span>
+              <strong id="alert-count">--</strong>
+            </article>
+            <article>
+              <span>Highest trend</span>
+              <strong id="highest-risk">--</strong>
+            </article>
+          </div>
+
+          <div class="tabs" role="tablist" aria-label="Data views">
+            <button class="active" data-tab="risks" type="button">Risk</button>
+            <button data-tab="outages" type="button">Outages</button>
+            <button data-tab="news" type="button">News</button>
+            <button data-tab="gfs" type="button">GFS</button>
+            <button data-tab="sources" type="button">Sources</button>
+          </div>
+
+          <div id="risks" class="tab active"></div>
+          <div id="outages" class="tab"></div>
+          <div id="news" class="tab"></div>
+          <div id="gfs" class="tab"></div>
+          <div id="sources" class="tab"></div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
