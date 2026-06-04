@@ -83,7 +83,7 @@ function send(res, status, body, type = "application/json") {
   res.end(type === "application/json" ? JSON.stringify(body) : body);
 }
 
-function fetchText(url) {
+function fetchText(url, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
@@ -92,7 +92,7 @@ function fetchText(url) {
           "user-agent": USER_AGENT,
           accept: "application/geo+json, application/json, text/html, */*"
         },
-        timeout: 15000
+        timeout: timeoutMs
       },
       (res) => {
         let data = "";
@@ -107,7 +107,7 @@ function fetchText(url) {
         });
       }
     );
-    req.on("timeout", () => req.destroy(new Error(`Timeout from ${url}`)));
+    req.on("timeout", () => req.destroy(new Error(`Timeout after ${timeoutMs}ms from ${url}`)));
     req.on("error", reject);
   });
 }
@@ -118,6 +118,18 @@ async function cached(key, ttlMs, fn) {
   const value = await fn();
   cache[key] = { time: now, value };
   return value;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function chunks(items, size) {
+  const result = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
 }
 
 function numberFrom(text) {
@@ -201,11 +213,12 @@ async function getTrends() {
   });
 }
 
-function pressureLevel(score) {
-  if (score >= 90) return "High";
-  if (score >= 70) return "Elevated";
-  if (score >= 45) return "Watch";
-  return "Low";
+function pressureLevel(dropMbarPer24h) {
+  if (dropMbarPer24h >= 12) return "High";
+  if (dropMbarPer24h >= 9) return "Elevated";
+  if (dropMbarPer24h >= 6) return "Watch";
+  if (dropMbarPer24h >= 3) return "Low";
+  return "Minimal";
 }
 
 function summarizePressureDropPoint(point, hourly) {
@@ -231,7 +244,21 @@ function summarizePressureDropPoint(point, hourly) {
   }
 
   if (!best) {
-    best = { start: 0, end: 0, startPressure: Number(pressure[0]) || 0, endPressure: Number(pressure[0]) || 0, pressureDrop: 0 };
+    return {
+      point,
+      valid: false,
+      startTime: null,
+      endTime: null,
+      startPressure: null,
+      endPressure: null,
+      pressureDrop: 0,
+      dropHours: 0,
+      maxWind: 0,
+      precipTotal: 0,
+      score: 0,
+      dropMbarPer24h: 0,
+      level: "Minimal"
+    };
   }
 
   const windowWind = wind.slice(best.start, best.end + 1).map(Number).filter(Number.isFinite);
@@ -239,44 +266,74 @@ function summarizePressureDropPoint(point, hourly) {
   const maxWind = Math.max(0, ...windowWind);
   const precipTotal = windowPrecip.reduce((sum, value) => sum + value, 0);
   const dropHours = Math.max(1, best.end - best.start);
-  const dropRate = best.pressureDrop / dropHours;
-  const lowPressureScore = Math.max(0, (1013 - best.endPressure) * 2.1);
-  const dropScore = best.pressureDrop * 4.2;
-  const rateScore = dropRate * 16;
-  const windScore = maxWind * 1.05;
-  const precipScore = Math.min(22, precipTotal * 45);
-  const score = Math.max(0, Math.min(100, Math.round(lowPressureScore + dropScore + rateScore + windScore + precipScore)));
+  const dropMbarPer24h = best.pressureDrop / dropHours * 24;
+  const score = Math.max(0, Math.min(100, Math.round(dropMbarPer24h / 12 * 100)));
 
   return {
     point,
+    valid: true,
     startTime: times[best.start] || null,
     endTime: times[best.end] || null,
     startPressure: Number(best.startPressure.toFixed(1)),
     endPressure: Number(best.endPressure.toFixed(1)),
     pressureDrop: Number(best.pressureDrop.toFixed(1)),
     dropHours,
+    dropMbarPer24h: Number(dropMbarPer24h.toFixed(1)),
     maxWind: Math.round(maxWind),
     precipTotal: Number(precipTotal.toFixed(2)),
     score,
-    level: pressureLevel(score)
+    level: pressureLevel(dropMbarPer24h)
   };
 }
 
 async function getPressureOutlook() {
   return cached("pressure-outlook", 30 * 60 * 1000, async () => {
-    const latitudes = PRESSURE_POINTS.map((point) => point.lat).join(",");
-    const longitudes = PRESSURE_POINTS.map((point) => point.lon).join(",");
-    const url = `https://api.open-meteo.com/v1/gfs?latitude=${latitudes}&longitude=${longitudes}&hourly=pressure_msl,wind_speed_10m,precipitation&forecast_days=14&timezone=America%2FNew_York&wind_speed_unit=mph&precipitation_unit=inch`;
-    const data = JSON.parse(await fetchText(url));
-    const forecasts = Array.isArray(data) ? data : [data];
-    const areas = forecasts.map((forecast, index) => {
-      return {
-        ...summarizePressureDropPoint(PRESSURE_POINTS[index], forecast.hourly || {}),
-        model: "NOAA GFS"
-      };
-    }).sort((a, b) => b.score - a.score);
+    try {
+      return await buildPressureOutlook();
+    } catch (error) {
+      const stale = cache["pressure-outlook"]?.value;
+      if (stale?.areas?.length) {
+        return {
+          ...stale,
+          status: "stale",
+          warning: `Live GFS refresh failed; showing last successful pressure outlook. ${error.message}`,
+          updated: stale.updated
+        };
+      }
+      return emptyPressureOutlook(error);
+    }
+  });
+}
 
-    const features = areas.map((area) => ({
+async function buildPressureOutlook() {
+  let forecastSet;
+  let source;
+  let model;
+  const gfsErrorMessages = [];
+
+  try {
+    forecastSet = await fetchPressureForecastChunks("gfs", 7);
+    source = "NOAA GFS 14-day hourly pressure, wind, and precipitation forecast via Open-Meteo GFS API. Pivotal Weather GFS is linked as the model-map comparison view.";
+    model = "NOAA GFS";
+  } catch (error) {
+    gfsErrorMessages.push(error.message);
+    forecastSet = await fetchNwsPressureForecasts();
+    source = "NWS gridpoint pressure forecast used as a fallback because the GFS endpoint is temporarily unavailable. Pivotal Weather GFS remains linked for comparison.";
+    model = "NWS gridpoint fallback";
+  }
+
+  const areas = forecastSet.map(({ point, forecast }) => {
+      return {
+        ...summarizePressureDropPoint(point, forecast.hourly || {}),
+        model
+      };
+    }).filter((area) => area.valid).sort((a, b) => b.score - a.score);
+
+  if (!areas.length) {
+    throw new Error(`${model} returned no usable pressure values`);
+  }
+
+  const features = areas.map((area) => ({
       type: "Feature",
       geometry: { type: "Point", coordinates: [area.point.lon, area.point.lat] },
       properties: {
@@ -290,6 +347,7 @@ async function getPressureOutlook() {
         endPressureHpa: area.endPressure,
         pressureDropHpa: area.pressureDrop,
         dropHours: area.dropHours,
+        dropMbarPer24h: area.dropMbarPer24h,
         riskLevel: area.level,
         riskScore: area.score,
         maxWindMph: area.maxWind,
@@ -297,12 +355,15 @@ async function getPressureOutlook() {
       }
     }));
 
-    return {
-      source: "NOAA GFS 14-day hourly pressure, wind, and precipitation forecast via Open-Meteo GFS API. Pivotal Weather GFS is linked as the model-map comparison view.",
-      model: "NOAA GFS",
+  return {
+      status: model === "NOAA GFS" ? "live" : "fallback",
+      warning: gfsErrorMessages.length ? `GFS endpoint failed: ${gfsErrorMessages.join("; ")}` : null,
+      source,
+      model,
       modelLinks: [
         { name: "Pivotal Weather GFS", url: "https://www.pivotalweather.com/model.php?m=gfs" },
         { name: "Open-Meteo GFS API", url: "https://open-meteo.com/en/docs/gfs-api" },
+        { name: "NWS gridpoint API", url: "https://www.weather.gov/documentation/services-web-api" },
         { name: "NOAA GFS overview", url: "https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast" }
       ],
       updated: new Date().toISOString(),
@@ -313,7 +374,118 @@ async function getPressureOutlook() {
         features
       }
     };
+}
+
+async function fetchPressureForecastChunks(endpoint, chunkSize) {
+  const results = [];
+  const failures = [];
+  for (const pointChunk of chunks(PRESSURE_POINTS, chunkSize)) {
+    const latitudes = pointChunk.map((point) => point.lat).join(",");
+    const longitudes = pointChunk.map((point) => point.lon).join(",");
+    const url = `https://api.open-meteo.com/v1/${endpoint}?latitude=${latitudes}&longitude=${longitudes}&hourly=pressure_msl,wind_speed_10m,precipitation&forecast_days=14&timezone=America%2FNew_York&wind_speed_unit=mph&precipitation_unit=inch`;
+    try {
+      const data = JSON.parse(await fetchText(url, 4000));
+      const forecasts = Array.isArray(data) ? data : [data];
+      forecasts.forEach((forecast, index) => {
+        if (pointChunk[index]) results.push({ point: pointChunk[index], forecast });
+      });
+    } catch (error) {
+      failures.push(error.message);
+      if (!results.length) break;
+    }
+    await sleep(350);
+  }
+  if (!results.length) {
+    throw new Error(`${endpoint} pressure forecast unavailable: ${failures.join("; ")}`);
+  }
+  return results;
+}
+
+async function fetchNwsPressureForecasts() {
+  const tasks = PRESSURE_POINTS.map(async (point) => {
+    const pointUrl = `https://api.weather.gov/points/${point.lat},${point.lon}`;
+    const pointData = JSON.parse(await fetchText(pointUrl, 4500));
+    const gridUrl = pointData.properties?.forecastGridData;
+    if (!gridUrl) throw new Error(`No NWS grid URL for ${point.city}`);
+    const gridData = JSON.parse(await fetchText(gridUrl, 6500));
+    return { point, forecast: nwsGridToHourlyForecast(gridData.properties || {}) };
   });
+  const settled = await Promise.allSettled(tasks);
+  const results = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+  if (!results.length) {
+    const failures = settled.filter((item) => item.status === "rejected").map((item) => item.reason?.message || String(item.reason));
+    throw new Error(`NWS pressure forecast unavailable: ${failures.join("; ")}`);
+  }
+  return results;
+}
+
+function nwsGridToHourlyForecast(properties) {
+  return {
+    hourly: {
+      time: expandNwsValues(properties.pressure?.values || [], (value) => value).map((row) => row.time),
+      pressure_msl: expandNwsValues(properties.pressure?.values || [], normalizePressureValue).map((row) => row.value),
+      wind_speed_10m: expandNwsValues(properties.windSpeed?.values || [], normalizeWindValue).map((row) => row.value),
+      precipitation: expandNwsValues(properties.quantitativePrecipitation?.values || [], normalizePrecipValue).map((row) => row.value)
+    }
+  };
+}
+
+function expandNwsValues(values, normalize) {
+  const rows = [];
+  values.forEach((entry) => {
+    const [startText, durationText = "PT1H"] = String(entry.validTime || "").split("/");
+    const start = new Date(startText);
+    if (Number.isNaN(start.valueOf())) return;
+    const hours = Math.max(1, durationHours(durationText));
+    const value = normalize(entry.value);
+    for (let offset = 0; offset < hours; offset += 1) {
+      rows.push({ time: new Date(start.getTime() + offset * 60 * 60 * 1000).toISOString(), value });
+    }
+  });
+  return rows;
+}
+
+function durationHours(durationText) {
+  const days = Number(durationText.match(/P(\d+)D/)?.[1] || 0);
+  const hours = Number(durationText.match(/T(\d+)H/)?.[1] || 0);
+  return days * 24 + hours || 1;
+}
+
+function normalizePressureValue(value) {
+  const number = Number(value) || 0;
+  if (number > 20 && number < 40) return number * 33.8639;
+  return number > 2000 ? number / 100 : number;
+}
+
+function normalizeWindValue(value) {
+  const number = Number(value) || 0;
+  return number * 0.621371;
+}
+
+function normalizePrecipValue(value) {
+  const number = Number(value) || 0;
+  return number / 25.4;
+}
+
+function emptyPressureOutlook(error) {
+  return {
+    status: "unavailable",
+    warning: `Pressure outlook temporarily unavailable: ${error.message}`,
+    source: "NOAA GFS pressure outlook is temporarily unavailable from the upstream provider.",
+    model: "NOAA GFS",
+    modelLinks: [
+      { name: "Pivotal Weather GFS", url: "https://www.pivotalweather.com/model.php?m=gfs" },
+      { name: "Open-Meteo GFS API", url: "https://open-meteo.com/en/docs/gfs-api" },
+      { name: "NOAA GFS overview", url: "https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast" }
+    ],
+    updated: new Date().toISOString(),
+    areas: [],
+    geojson: {
+      type: "FeatureCollection",
+      name: "two_week_pressure_drop_outlook",
+      features: []
+    }
+  };
 }
 
 async function getNews() {
