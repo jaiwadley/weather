@@ -50,7 +50,7 @@ function markerColor(level) {
 }
 
 function pressureColor(level) {
-  return { High: "#dc2626", Elevated: "#7c3aed", Watch: "#2563eb", Low: "#138a72" }[level] || "#607080";
+  return { High: "#dc2626", Elevated: "#7c3aed", Watch: "#2563eb", Low: "#138a72", Minimal: "#607080" }[level] || "#607080";
 }
 
 function clearLayer(name) {
@@ -65,17 +65,51 @@ async function getJson(url) {
   return res.json();
 }
 
+async function safeGetJson(url, fallback) {
+  try {
+    return await getJson(url);
+  } catch (error) {
+    return { ...fallback, warning: error.message };
+  }
+}
+
 async function refreshAll(manual = false) {
   els.updated.textContent = manual ? "Refreshing live feeds..." : "Loading live feeds...";
   els.refresh.disabled = true;
   try {
     const [alerts, trends, pressure, outages, news, sources] = await Promise.all([
-      getJson("/api/weather/alerts"),
-      getJson("/api/weather/trends"),
-      getJson("/api/weather/pressure-outlook"),
-      getJson("/api/outages"),
-      getJson("/api/news"),
-      getJson("/api/sources")
+      safeGetJson("/api/weather/alerts", {
+        source: "Weather.gov / National Weather Service",
+        updated: new Date().toISOString(),
+        geojson: { type: "FeatureCollection", features: [] }
+      }),
+      safeGetJson("/api/weather/trends", {
+        source: "Weather.gov hourly forecast",
+        updated: new Date().toISOString(),
+        trends: []
+      }),
+      safeGetJson("/api/weather/pressure-outlook", {
+        source: "Pressure outlook unavailable",
+        updated: new Date().toISOString(),
+        areas: [],
+        modelLinks: [],
+        geojson: { type: "FeatureCollection", features: [] }
+      }),
+      safeGetJson("/api/outages", {
+        source: "Outage totals unavailable",
+        updated: new Date().toISOString(),
+        states: [],
+        totalOut: 0
+      }),
+      safeGetJson("/api/news", {
+        source: "News scan unavailable",
+        updated: new Date().toISOString(),
+        items: []
+      }),
+      safeGetJson("/api/sources", {
+        updated: new Date().toISOString(),
+        sources: []
+      })
     ]);
 
     renderAlerts(alerts);
@@ -86,13 +120,16 @@ async function refreshAll(manual = false) {
     renderGfs(pressure);
     renderSources(sources);
 
-    const highest = [...trends.trends].sort((a, b) => b.score - a.score)[0];
+    const highest = [...(trends.trends || [])].sort((a, b) => b.score - a.score)[0];
     els.totalOutages.textContent = formatNumber(outages.totalOut);
     els.alertCount.textContent = formatNumber(alerts.geojson.features.length);
     els.highestRisk.textContent = highest ? highest.level : "--";
 
     state.nextRefresh = Date.now() + state.refreshMs;
-    els.updated.textContent = `Updated ${formatTime(new Date())}. Auto-refresh in 10 min.`;
+    const warnings = [alerts, trends, pressure, outages, news, sources].filter((feed) => feed.warning).length;
+    els.updated.textContent = warnings
+      ? `Updated ${formatTime(new Date())}. ${warnings} feed issue${warnings === 1 ? "" : "s"}; showing available data.`
+      : `Updated ${formatTime(new Date())}. Auto-refresh in 10 min.`;
   } catch (error) {
     els.updated.textContent = `Feed issue: ${error.message}`;
   } finally {
@@ -230,6 +267,7 @@ function renderPressureOutlook(data) {
       <p class="popup-title">${props.city}, ${props.stateAbbr}: ${props.riskLevel}</p>
       <p class="popup-meta">${props.model || "Forecast model"}</p>
       <p class="popup-meta">Pressure drop ${props.pressureDropHpa} mbar over ${props.dropHours} hours</p>
+      <p class="popup-meta">${props.dropMbarPer24h} mbar per 24 hours</p>
       <p class="popup-meta">Starts ${formatTime(props.dropStarts)}; bottoms out ${formatTime(props.dropBottomsOut)}</p>
       <p class="popup-meta">${props.startPressureHpa} mbar to ${props.endPressureHpa} mbar</p>
       <p class="popup-meta">Max wind ${props.maxWindMph} mph; precip ${props.precipIn} in</p>
@@ -245,6 +283,7 @@ function renderPressureOutlook(data) {
       <p class="popup-title">${props.city}, ${props.stateAbbr}: ${props.riskLevel}</p>
       <p class="popup-meta">${props.model || "Forecast model"}</p>
       <p class="popup-meta">Pressure drop ${props.pressureDropHpa} mbar over ${props.dropHours} hours</p>
+      <p class="popup-meta">${props.dropMbarPer24h} mbar per 24 hours</p>
       <p class="popup-meta">Starts ${formatTime(props.dropStarts)}; bottoms out ${formatTime(props.dropBottomsOut)}</p>
       <p class="popup-meta">Max wind ${props.maxWindMph} mph; precip ${props.precipIn} in</p>
     `).addTo(group);
@@ -370,10 +409,12 @@ function downloadLink(label, filename, data) {
 function renderGfs(data) {
   const areas = data.areas || [];
   const topAreas = [...areas].sort((a, b) => b.score - a.score).slice(0, 8);
+  const statusNote = data.warning ? `<p class="warning-text">${data.warning}</p>` : "";
   els.gfs.innerHTML = `
     <article class="item">
       <h2>Two-week pressure-drop areas</h2>
       <p>${data.source} Updated ${formatTime(data.updated)}.</p>
+      ${statusNote}
       <div class="source-actions">
         ${(data.modelLinks || []).map((link) => `<a href="${link.url}" target="_blank" rel="noreferrer">${link.name}</a>`).join("")}
       </div>
@@ -386,23 +427,24 @@ function renderGfs(data) {
         <span class="Elevated">Elevated</span>
         <span class="Watch">Watch</span>
         <span class="Low">Low</span>
+        <span class="Minimal">Minimal</span>
       </div>
     </article>
     <article class="item">
       <h2>Largest forecast pressure drops</h2>
-      ${topAreas.map((area) => `
+      ${topAreas.length ? topAreas.map((area) => `
         <div class="item">
           <div class="row">
             <h3>${area.point.city}, ${area.point.state}</h3>
             <span class="pill ${area.level}">${area.level}</span>
           </div>
-          <p>${area.model}. ${area.pressureDrop} mbar drop from ${formatTime(area.startTime)} to ${formatTime(area.endTime)}. ${area.startPressure} mbar to ${area.endPressure} mbar; max wind ${area.maxWind} mph; precip ${area.precipTotal} in.</p>
+          <p>${area.model}. ${area.dropMbarPer24h} mbar/24h rate from ${formatTime(area.startTime)} to ${formatTime(area.endTime)}. Total drop ${area.pressureDrop} mbar; ${area.startPressure} mbar to ${area.endPressure} mbar; max wind ${area.maxWind} mph; precip ${area.precipTotal} in.</p>
         </div>
-      `).join("")}
+      `).join("") : '<p>No pressure-drop areas are available from the forecast feed right now.</p>'}
     </article>
     <article class="item">
       <h2>How to read this layer</h2>
-      <p>The circles show sampled areas where pressure is forecast to move from higher to lower values during the next two weeks. Larger, warmer circles indicate sharper drops combined with lower pressure, wind, or precipitation, which can support cloud formation and storms.</p>
+      <p>The circles show sampled areas where pressure is forecast to move from higher to lower values during the next two weeks. High is 12+ mbar per 24 hours, Elevated is 9+, Watch is 6+, and Low is 3+.</p>
     </article>
   `;
 

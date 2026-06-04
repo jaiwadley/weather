@@ -309,6 +309,15 @@ h1 {
   text-decoration: none;
 }
 
+.warning-text {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid #f2c94c;
+  border-radius: 8px;
+  background: #fff8db;
+  color: #6b5200;
+}
+
 .layer-toggle {
   display: flex;
   align-items: center;
@@ -332,7 +341,7 @@ h1 {
 
 .pressure-key {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
   margin-top: 10px;
 }
@@ -361,6 +370,10 @@ h1 {
 
 .pressure-key .Low {
   background: var(--green);
+}
+
+.pressure-key .Minimal {
+  background: var(--muted);
 }
 
 .pressure-step span {
@@ -404,6 +417,10 @@ h1 {
 
 .pill.Low {
   background: var(--green);
+}
+
+.pill.Minimal {
+  background: var(--muted);
 }
 
 .row {
